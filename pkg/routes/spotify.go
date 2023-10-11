@@ -1,28 +1,26 @@
 package routes
 
 import (
-	"bytes"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/url"
-	"os"
 	"t-murch/top-25-api/pkg/models"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 func addSpotifyRoutes(rg *gin.RouterGroup) {
-	spotify := rg.Group("/spotify")
+	// rg.Use(CookieTool())
+	spotify := rg.Group("/spotify", CookieTool())
 
 	spotify.GET("/", func(ctx *gin.Context) {
 		ctx.JSON(http.StatusOK, "Spotify Base Route")
+	})
+	spotify.GET("/topTracks", func(ctx *gin.Context) {
+
 	})
 	spotify.GET("/topItems", func(ctx *gin.Context) {
 		itemType := ctx.DefaultQuery("type", string(models.Tracks))
@@ -56,181 +54,82 @@ func addSpotifyRoutes(rg *gin.RouterGroup) {
 		}
 		ctx.JSON(http.StatusOK, string(releases))
 	})
-	/**
-	1. Incoming request
-	2. redirect to Spotc with a redirect param back to my BE
-	3. Spotify returns token
-	4. redirect to homepage with token
-	**/
-	spotify.GET("/login", func(ctx *gin.Context) {
-		state, _ := GenerateRandomString(32)
-		ctx.SetCookie("stateKey", state, 60*60*2, "/top_25", "localhost", false, true)
-		ctx.AddParam("redirect_uri", os.Getenv("SPOTIFY_REDIRECT"))
-		ctx.AddParam("show_dialog", "true")
-		ctx.AddParam("state", state)
-		ctx.AddParam("scope", models.SCOPES)
-		ctx.Redirect(http.StatusFound, models.LOGIN_REDIRECT_URL)
-	})
-
-	spotify.GET("/callback", func(ctx *gin.Context) {
-		ctx.AddParam("code", ctx.Query("code"))
-		ctx.AddParam("redirect_uri", os.Getenv("SPOTIIFY_REDIRECT"))
-		ctx.AddParam("grant_type", "authorization_code")
-
-		state := ctx.Query("state")
-		storedState, error := ctx.Cookie("stateKey")
-		if error != nil || storedState != state {
-			ctx.AddParam("error", "state_mismatch")
-			log.Fatalf("Appears to have interference between /login & /callback. Error: %v", error)
-			ctx.Redirect(http.StatusBadRequest, "http://localhost:8080")
-		}
-
-		error = getAccessToken(ctx)
-		if error != nil {
-			ctx.AddParam("error", "Failed to gain Access Token")
-			log.Fatalln("Failed to gain Access Token")
-			ctx.Redirect(http.StatusBadRequest, "http://localhost:8080")
-		}
-		ctx.Redirect(http.StatusAccepted, "http://localhost:8080")
-	})
-}
-
-func GenerateRandomBytes(num int) ([]byte, error) {
-	bytes := make([]byte, num)
-	_, err := rand.Read(bytes)
-	if err != nil {
-		return nil, err
-	}
-
-	return bytes, nil
-}
-
-func GenerateRandomString(num int) (string, error) {
-	bytes, err := GenerateRandomBytes(num)
-	return base64.URLEncoding.EncodeToString(bytes), err
 }
 
 func fetchSpotifyApi(ctx *gin.Context, endpoint string, method string) (status string, aBody []byte, err error) {
-	token, _ := ctx.Cookie("sessionToken") // Errors for this handled in middleware.
+	sessionToken, _ := ctx.Cookie("sessionToken") // Errors for this handled in middleware.
+	if len(sessionToken) == 0 {
+		errorMessage := fmt.Sprintf("Forbidden without session established. Please log in. Error=%s. ", err)
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": errorMessage})
+		log.Println(errorMessage)
+		return http.StatusText(500), []byte(errorMessage), nil
+		// ctx.Abort()
+	}
+
+	session := sessions.Default(ctx)
+	redisToken := session.Get(sessionToken)
+	log.Printf("redisToken: %s", redisToken)
+	if redisToken == nil {
+		errorMessage := fmt.Sprintf("Cookie found without Session established. ")
+		log.Println(errorMessage)
+		ctx.SetCookie("sessionToken", sessionToken, 0, "/", "10.0.0.5", false, true)
+		// ctx.JSON(http.StatusUnauthorized, gin.H{"error": errorMessage})
+		return http.StatusText(500), []byte(errorMessage), nil
+		// ctx.Abort()
+	}
+	// var token models.SpotifyTokenResponse
+	var token string
+	error := json.Unmarshal(session.Get(sessionToken).([]byte), &token)
+	if error != nil {
+		log.Println(err)
+	}
+
+	if len(token) == 0 {
+		fmt.Println("token is empty, return out.")
+		return "", nil, nil
+	}
 
 	fmt.Printf("passed in endpoint: %s \n", endpoint)
-	// fmt.Printf("updated token: %s \n", token)
 	bearer := "Bearer " + token
 
 	client := &http.Client{}
 
-	req, error := http.NewRequest(method, models.SpotifyUrl+endpoint, nil)
-	if error != nil {
-		log.Println(error)
-		return "", nil, error
+	req, err := http.NewRequest(method, models.SpotifyUrl+endpoint, nil)
+	if err != nil {
+		log.Println(err)
+		return "", nil, err
+	}
+
+	for name, vals := range req.Header {
+		for _, value := range vals {
+			fmt.Printf("Headers: name=%s, val=%s", name, value)
+		}
 	}
 
 	req.Header.Add("Authorization", bearer)
-	resp, error := client.Do(req)
-	if error != nil {
-		log.Print(error)
-		return "", nil, error
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Print(err)
+		return http.StatusText(500), nil, err
+	}
+
+	if resp.StatusCode != 200 {
+		log.Println("Failed to fetch data from Spotify.")
+		log.Println(resp.Status)
 	}
 
 	defer resp.Body.Close()
-	body, error := io.ReadAll(resp.Body)
-	if error != nil {
-		log.Println(error)
-		return "", nil, error
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Println(err)
+		return "", nil, err
 	}
 
 	return resp.Status, body, nil
 }
 
-func getAccessToken(ctx *gin.Context) error {
-	fmt.Println("Getting new Access Token")
-
-	session := sessions.Default(ctx)
-	sessionToken := uuid.NewString()
-
-	data := url.Values{}
-	data.Set("grant_type", "client_credentials")
-	data.Set("client_id", os.Getenv("SPOT_CLIENT_ID"))
-	data.Set("client_secret", os.Getenv("SPOT_CLIENT_SECRET"))
-
-	client := &http.Client{}
-	req, error := http.NewRequest(http.MethodPost, "https://accounts.spotify.com/api/token", bytes.NewBuffer([]byte(data.Encode())))
-	if error != nil {
-		log.Printf("Error building Request Struct for Spotify. Error: %s \n", error)
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, error := client.Do(req)
-	if error != nil {
-		log.Printf("Error getting new Access Token from Spotify. Error: %s \n", error)
-	}
-	defer resp.Body.Close()
-
-	body, error := io.ReadAll(resp.Body)
-	if error != nil {
-		log.Printf("Error getting reading body of Response from Acccess Token. Error: %s \n", error)
-	}
-
-	var tokenResponse models.SpotifyTokenResponse
-	error = json.Unmarshal(body, &tokenResponse)
-	if error != nil {
-		log.Printf("Error parsing response from getting new Spot Token. Error: %s \n", error)
-	}
-
-	ctx.SetCookie("sessionToken", sessionToken, 60*60*2, "/top_25", "localhost", false, true)
-	session.Set(sessionToken, tokenResponse)
-	log.Printf("Sucessfully set Cookie and established session with sessionToken: %s", sessionToken)
-	// fmt.Println("tokenResponse: " + tokenResponse.AccessToken + "\n")
-	return error
-}
-
-// /**
-//  * After gaining user permission, we
-//  * ping /token to gain Access and Refresh Tokens.
-//  */
-// server.get('/callback', async (request: UserRequest, reply: FastifyReply): Promise<void> => {
-//   if (client_id === undefined || redirect_uri === undefined) {
-//     server.log.error('You forgot to add your client credentials!! ');
-//     reply.redirect(FE_REDIRECT);
-//   } else {
-//     const requestDataProperty = new URLSearchParams({ 'code': request.query.code, 'redirect_uri': redirect_uri, 'grant_type': 'authorization_code' });
-//     const state: string = request.query.state;
-//     const storedState = request.cookies ? request.cookies['stateKey'] : null;
-
-//     /**
-//      * If state mismatch, redirect back
-//      * Otherwise, create the auth object needed
-//      * for Access & Refresh Tokens
-//      */
-//     if (state === null || state !== storedState) {
-//       reply.redirect(FE_REDIRECT + '#' + new URLSearchParams({ 'error': 'state_mismatch' }));
-//     } else {
-//       reply.clearCookie('stateKey');
-
-//       try {
-//         const { data, status, statusText } = await getTokens(axiosInstance, requestDataProperty);
-
-//         if (statusText === 'OK') {
-//           const tokens = new URLSearchParams({
-//             'access_token': data?.access_token,
-//             'refresh_token': data?.refresh_token,
-//           });
-//           reply.redirect(FE_REDIRECT + '#' + tokens);
-//         } else {
-//           server.log.error(new Error('Server related error retrieving login tokens.' + { cause: data }));
-//           reply.redirect(FE_REDIRECT);
-//         }
-//       } catch (error: any) {
-//         server.log.error('Failed to login and retrieve tokens. Error: %o' + error);
-//         reply.redirect(FE_REDIRECT);
-//       }
-//     }
-//   }
-// });
-// };
-
 func getTopTracks(ctx *gin.Context, itemType models.TopItems, term models.TopItemsTerm) (string, []byte, error) {
-	return fetchSpotifyApi(ctx, fmt.Sprintf("v1/me/top/%s?time_range=%s&limit=%d", string(itemType), string(term), 5), http.MethodGet)
+	return fetchSpotifyApi(ctx, fmt.Sprintf("v1/me/top/%s?time_range=%s&limit=%d", string(itemType), string(term), 25), http.MethodGet)
 }
 
 func getProfile(ctx *gin.Context) (string, []byte, error) {
@@ -239,4 +138,22 @@ func getProfile(ctx *gin.Context) (string, []byte, error) {
 
 func getNewReleases(ctx *gin.Context) (string, []byte, error) {
 	return fetchSpotifyApi(ctx, "v1/browse/new-releases", http.MethodGet)
+}
+
+var topSongsUSA = "37i9dQZEVXbLp5XoPON0wI"
+
+func getTopPlayedByCountry(ctx *gin.Context) (string, []byte, error) {
+	return fetchSpotifyApi(ctx, "v1/browse/playlists/%s/tracks", topSongsUSA)
+}
+
+func HeaderLogger() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		headers := ctx.Request.Header
+		fmt.Printf("Incoming headers = %s \n", headers)
+
+		cookieExplicit, _ := ctx.Cookie("sessionToken")
+
+		fmt.Printf("Incoming cookieExplicit = %s \n", cookieExplicit)
+		ctx.Next()
+	}
 }
