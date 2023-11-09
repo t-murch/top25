@@ -1,0 +1,21 @@
+version: '3'
+services:
+    redis:
+        image: redis:latest
+        volumes:
+            - redis-data:/data
+        ports:
+            - 6379:6379
+    server:
+        build: 
+            dockerfile: Dockerfile.main
+            context: .
+        environment:
+            - REDISPORT=6379
+            - REDISHOST=redis
+        volumes:
+            - .:/app
+        ports:
+            - 8080:8080
+volumes:
+    redis-data:

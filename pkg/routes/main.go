@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 
+	"t-murch/top-25-api/pkg/models"
+
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/redis"
@@ -15,10 +17,17 @@ var router = gin.Default()
 
 func Run() {
 
+	/**
+	Database for nows
+	*/
+	// models.SupabaseClient.InitializeSupabaseClient()
+	models.InitializeSupabaseClient()
+
 	// ***** FIX ME LATER, I AM NOOT VERY SECURE *****************
 	// store := cookie.NewStore([]byte("laneelise2512"))
 	// // store.MaxLength(8192)
 
+	// store, err := redis.NewStore(10, "tcp", "redis:6379", "", []byte("laneelise2512"))
 	store, err := redis.NewStore(10, "tcp", "localhost:6379", "", []byte("laneelise2512"))
 	if err != nil {
 		log.Fatal("Error creating Redis store: ", err)
